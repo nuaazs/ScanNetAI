@@ -30,6 +30,7 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 def load_dicom_series(directory):
     reader = sitk.ImageSeriesReader()
     dicom_names = reader.GetGDCMSeriesFileNames(directory)
+    # print(dicom_names)
     reader.SetFileNames(dicom_names)
     image = reader.Execute()
     return image
@@ -98,6 +99,31 @@ def safe_crop_image_to_match(reference_image, target_image):
     return cropped_target_image
 
 
+
+def convert_structure_set_to_image(structure_set_path, reference_image):
+    # 读取 RT Structure Set
+    # rtss = sitk.ReadImage(structure_set_path)
+    rtss = pydicom.dcmread(structure_set_path,force=True)
+
+    # 创建一个与参考图像同样大小的空图像，用于存储转换后的结构集
+    label_map = sitk.Image(reference_image.GetSize(), sitk.sitkUInt8)
+    label_map.CopyInformation(reference_image)
+
+    # 获取 RT Structure Set 中所有轮廓的信息
+    label_seq = sitk.GetArrayViewFromImage(rtss)
+
+    # 遍历每个轮廓，将它们转换为图像
+    for label_num in range(1, label_seq.shape[0]):
+        label = label_seq[label_num,:,:,:]
+        label_image = sitk.GetImageFromArray(label)
+        label_image.CopyInformation(reference_image)
+        # 可能需要额外的处理来确保 label_image 与 reference_image 对齐
+        # 为每个轮廓生成一个二值图像
+        label_map = sitk.Maximum(label_map, label_image)
+    return label_map
+
+
+
 def process_ct_dose(folder, output_path, resample_spacing):
     """
     Process CT and Dose DICOM files in the given folder, resample them, 
@@ -108,19 +134,29 @@ def process_ct_dose(folder, output_path, resample_spacing):
     print(os.path.join(folder, '*_[cC][tT]*.[dD][cC][mM]'))
     ct_files = sorted(glob.glob(os.path.join(folder, '*_[cC][tT]*.[dD][cC][mM]')))
     dose_files = sorted(glob.glob(os.path.join(folder, '*_[dD][oO][sS][eE]*.[dD][cC][mM]')))
+    struct_files = sorted(glob.glob(os.path.join(folder, '*_StrctrSets*.[dD][cC][mM]')))
     
-    if (len(ct_files) <= 10) or (len(dose_files) <= 0):
+    if (len(ct_files) <= 10) or (len(dose_files) <= 0) or (len(struct_files) <= 0):
         logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
-        return None,None
+        return None,None,None
     # Process CT files
     ct_image = load_dicom_series(folder)
     
     # Read dose
-    dose_dcm_path = dose_files[0]
-    dose_image = sitk.ReadImage(dose_dcm_path)
+    dose_image = sitk.ReadImage(dose_files[0])
+
+
+    structure_image = convert_structure_set_to_image(struct_files[0], ct_image)
+    print(structure_image)
 
     ct_image = resample_image(ct_image, resample_spacing)
     dose_image = resample_image(dose_image, resample_spacing)
+    
+    # 保存为 NIfTI 文件
+    output_path = 'output.nii.gz'
+    sitk.WriteImage(structure_image, output_path)
+
+
     dose_size = dose_image.GetSize()
     dose_origin = dose_image.GetOrigin()
 
@@ -147,6 +183,8 @@ def process_ct_dose(folder, output_path, resample_spacing):
     cropped_ct_size = [ct_index_end[i] - ct_index_start[i] for i in range(3)]
     cropped_ct = sitk.RegionOfInterest(ct_image, cropped_ct_size, ct_index_start)
 
+    cropped_struce = sitk.RegionOfInterest(struce_image, cropped_ct_size, ct_index_start)
+
     # 裁剪剂量图像
     dose_index_start = [int(round((overlap_start[i] - dose_origin[i]) / dose_spacing[i])) for i in range(3)]
     dose_index_end = [int(round((overlap_end[i] - dose_origin[i]) / dose_spacing[i])) for i in range(3)]
@@ -157,6 +195,9 @@ def process_ct_dose(folder, output_path, resample_spacing):
     logging.info(f'Dose image shape: {cropped_dose.GetSize()}')
     logging.info(f'CT image spacing: {cropped_ct.GetSpacing()}')
     logging.info(f'Dose image spacing: {cropped_dose.GetSpacing()}')
+    
+    logging.info(f'cropped_struce shape: {cropped_struce.GetSize()}')
+    logging.info(f'cropped_struce origin: {cropped_struce.GetOrigin()}')
 
     if cropped_ct.GetSize() != cropped_dose.GetSize():
         logging.warning('CT and Dose image sizes do not match!')
@@ -201,8 +242,8 @@ def main(root_path, output_path, resample_spacing):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DICOM to NII.GZ Conversion Script')
-    parser.add_argument('--root_path', type=str, default="/home/zhaosheng/Documents/LiuHuan", help='Root path containing RT folders')
-    parser.add_argument('--output_path', type=str, default="./niis", help='Output path for NII.GZ files')
+    parser.add_argument('--root_path', type=str, default="/home/zhaosheng/Documents/LiuHuan/files", help='Root path containing RT folders')
+    parser.add_argument('--output_path', type=str, default="./niis_selected", help='Output path for NII.GZ files')
     parser.add_argument('--resample_spacing', type=float, nargs=3, metavar=('X', 'Y', 'Z'), default=[3.0, 3.0, 3.0], help='Resampling spacing in X, Y, and Z dimensions')
     args = parser.parse_args()
     

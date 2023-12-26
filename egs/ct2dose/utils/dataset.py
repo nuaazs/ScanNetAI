@@ -28,10 +28,17 @@ def ct2dose_dataset(images,labels):
     random_seed = 123
     train_frac = 0.8
     # Set the random seed and shuffle images and labels in the same order
+    
     np.random.seed(random_seed)
     np.random.shuffle(images)
     np.random.seed(random_seed)
     np.random.shuffle(labels)
+    assert len(images) == len(labels), "Mismatch in dataset lengths"
+    for i in range(len(images)):
+        # print(f"Image: {images[i]}")
+        # print(f"Label: {labels[i]}")
+        assert images[i].split('/')[-2] == images[i].split('/')[-2], "Mismatch in dataset filenames"
+
     # Split into training and validation sets
     num_train = int(train_frac * len(images))
     train_images = images[:num_train]
@@ -52,19 +59,18 @@ def ct2dose_dataset(images,labels):
     imtrans = Compose([
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        debug_transform,  # Debugging transform after loading the image
-        # add_channel_dim,  # Manually add channel dimension
+        # debug_transform,
         ScaleIntensity(),
         Resize((96, 96, 96)),
         RandAffine(prob=0.15, translate_range=(10, 10, 10), rotate_range=(np.pi / 36, np.pi / 36, np.pi / 36),
                 scale_range=(0.15, 0.15, 0.15), padding_mode="zeros"),
-        debug_transform,  # Debugging transform after EnsureChannelFirst
+        # debug_transform,  # Debugging transform after EnsureChannelFirst
         RandSpatialCrop((96, 96, 96), random_size=False)
     ])
 
     # Create MONAI datasets and data loaders
     train_ds = ArrayDataset(train_images, imtrans, train_labels, imtrans)
     val_ds = ArrayDataset(val_images, imtrans, val_labels, imtrans)
-    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=1, pin_memory=torch.cuda.is_available())
-    val_loader = DataLoader(val_ds, batch_size=2, num_workers=1, pin_memory=torch.cuda.is_available())
+    train_loader = DataLoader(train_ds, batch_size=8, shuffle=True, num_workers=4, pin_memory=torch.cuda.is_available())
+    val_loader = DataLoader(val_ds, batch_size=8, num_workers=4, pin_memory=torch.cuda.is_available())
     return train_loader, val_loader

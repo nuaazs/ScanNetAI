@@ -16,7 +16,7 @@ from torch.nn import MSELoss
 from monai.config import print_config
 from monai.data import ArrayDataset, DataLoader, partition_dataset
 from monai.networks.nets import UNet
-from monai.transforms import (Compose, LoadImage, ScaleIntensity, Resize, RandAffine, EnsureChannelFirst, RandSpatialCrop)
+from monai.transforms import (Compose, LoadImage, SaveImage, ScaleIntensity, Resize, RandAffine, EnsureChannelFirst, RandSpatialCrop)
 from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
 from ignite.metrics import MeanSquaredError
 from ignite.handlers import ModelCheckpoint, EarlyStopping
@@ -27,9 +27,9 @@ from utils.dataset import ct2dose_dataset
 # Initialize and parse command line arguments
 parser = argparse.ArgumentParser(description='3D Dose Prediction Project')
 parser.add_argument('--exp_name', type=str, default='unetr', help='Experiment name')
-parser.add_argument('--data_dir', type=str, default='common/niis', help='Directory for input data')
-parser.add_argument('--eval_interval', type=int, default=5, help='Interval of epochs to perform evaluation and visualization')
-parser.add_argument('--gpus', type=str, default='1', help='Comma-separated list of GPU IDs to use for training')
+parser.add_argument('--data_dir', type=str, default='common/niis_selected', help='Directory for input data')
+parser.add_argument('--eval_interval', type=int, default=1, help='Interval of epochs to perform evaluation and visualization')
+parser.add_argument('--gpus', type=str, default='1,2,3,4', help='Comma-separated list of GPU IDs to use for training')
 args = parser.parse_args()
 
 # Configure GPUs for training
@@ -52,59 +52,12 @@ console.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console.setFormatter(formatter)
 logging.getLogger('').addHandler(console)
-
 logging.info("Starting 3D Dose Prediction Project...")
 
 # Load dataset and split
 images = sorted(glob.glob(os.path.join(args.data_dir, "*/ct.nii.gz")))
 labels = sorted(glob.glob(os.path.join(args.data_dir, "*/dose.nii.gz")))
-ct2dose_dataset(images,labels)
-
-# Split dataset into training and validation sets
-random_seed = 123
-train_frac = 0.8
-
-# Set the random seed and shuffle images and labels in the same order
-np.random.seed(random_seed)
-np.random.shuffle(images)
-np.random.seed(random_seed)
-np.random.shuffle(labels)
-
-# Split into training and validation sets
-num_train = int(train_frac * len(images))
-train_images = images[:num_train]
-train_labels = labels[:num_train]
-val_images = images[num_train:]
-val_labels = labels[num_train:]
-
-
-def debug_transform(img):
-    print("Current shape:", img.shape)
-    return img
-
-def add_channel_dim(img):
-    if img.ndim == 3:  # Check if the image is 3D without channel dimension
-        img = img[np.newaxis, ...]  # Add a channel dimension
-    return img
-
-imtrans = Compose([
-    LoadImage(image_only=True),
-    EnsureChannelFirst(),
-    debug_transform,  # Debugging transform after loading the image
-    # add_channel_dim,  # Manually add channel dimension
-    ScaleIntensity(),
-    Resize((96, 96, 96)),
-    RandAffine(prob=0.15, translate_range=(10, 10, 10), rotate_range=(np.pi / 36, np.pi / 36, np.pi / 36),
-               scale_range=(0.15, 0.15, 0.15), padding_mode="zeros"),
-    debug_transform,  # Debugging transform after EnsureChannelFirst
-    RandSpatialCrop((96, 96, 96), random_size=False)
-])
-
-# Create MONAI datasets and data loaders
-train_ds = ArrayDataset(train_images, imtrans, train_labels, imtrans)
-val_ds = ArrayDataset(val_images, imtrans, val_labels, imtrans)
-train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=1, pin_memory=torch.cuda.is_available())
-val_loader = DataLoader(val_ds, batch_size=2, num_workers=1, pin_memory=torch.cuda.is_available())
+train_loader, val_loader = ct2dose_dataset(images,labels)
 
 # Define device and model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -138,13 +91,49 @@ train_tensorboard_stats_handler = TensorBoardStatsHandler(
 )
 train_tensorboard_stats_handler.attach(trainer)
 
-# Evaluation and visualization function
+
+def save_nifti(engine, epoch):
+    # Create directory for saving NIfTI files for this epoch
+    eval_dir = os.path.join(exp_dir, 'eval_niis', str(epoch))
+    os.makedirs(eval_dir, exist_ok=True)
+
+    # Fetch data from the evaluator
+    for i, batch_data in enumerate(val_loader):
+        # Assuming batch_data is a tuple of (images, labels)
+        images, labels = batch_data
+        # Forward pass to get predictions
+        with torch.no_grad():
+            preds = model(images.to(device))
+
+        # Save each item in the batch
+        for j in range(len(images)):
+            # Assuming the data loader also returns the file paths
+            file_id = f"{i:04d}_{j:04d}"
+
+            # Save the image, prediction, and label as NIfTI files
+            save_path = os.path.join(eval_dir, file_id)
+            os.makedirs(save_path, exist_ok=True)
+
+            # Save
+            image_array = images[j].cpu().numpy()
+            np.save(os.path.join(save_path, 'image.npy'), image_array)
+
+            pred_array = preds[j].cpu().numpy()
+            np.save(os.path.join(save_path, 'pred.npy'), pred_array)
+            
+            label_array = labels[j].cpu().numpy()
+            np.save(os.path.join(save_path, 'label.npy'), label_array)
+
+            logging.info(f"Saved NIfTI files for {file_id} in {save_path}")
+
+# Modify the evaluate_and_visualize function
 def evaluate_and_visualize(engine):
     epoch = engine.state.epoch
     if epoch % args.eval_interval == 0:
         evaluator.run(val_loader)
-        # Visualization code here
-        # Save visualizations as NIfTI files in exp_dir
+        # Call the save_nifti function
+        save_nifti(evaluator, epoch)
+        logging.info(f"Epoch {epoch} evaluation and visualization completed.")
 
 # Attach evaluation and visualization to trainer
 trainer.add_event_handler(Events.EPOCH_COMPLETED(every=args.eval_interval), evaluate_and_visualize)
