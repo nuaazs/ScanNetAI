@@ -16,8 +16,6 @@
 </div>
 <br>
 
-### GitHub Project Description
-
 ScanNetAI is an innovative self-supervised deep learning model meticulously designed for processing and analyzing CT images. Developed with cutting-edge machine learning techniques, ScanNetAI excels in handling large-scale CT data, providing unparalleled insights into medical image analysis. Pre-trained on a diverse range of CT imaging data, ScanNetAI offers exceptional performance in critical downstream tasks, including image segmentation, medical image conversion, and dosage prediction. The model's robustness and versatility make it an indispensable tool for researchers and professionals in medical imaging, offering a new frontier in diagnostics and treatment planning.
 
 ## Acknowledgements
