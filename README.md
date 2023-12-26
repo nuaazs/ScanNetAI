@@ -36,7 +36,7 @@ Special thanks to the Jiangsu Provincial People's Hospital for their invaluable 
 To use ScanNetAI, first clone the repository:
 
 ```
-git clone https://github.com/your-username/ScanNetAI.git
+git clone https://github.com/nuaazs/ScanNetAI.git
 ```
 
 Then install the required dependencies:
