@@ -4,8 +4,9 @@
 
 <div align="center">
     <h1>ScanNetAI: Self-Supervised Deep Learning Model for CT Image Analysis</h1>
-    <img src="ScanNetAI-logo.png" alt="ScanNetAI Logo">
+    <img src="scannetai.png" alt="ScanNetAI Logo" style="width:20%;">
 </div>
+
 
 <div align="center">
     <a href="./README.zh.md"><img src="https://img.shields.io/badge/README-中文版本-red"></a>
