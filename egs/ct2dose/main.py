@@ -15,10 +15,10 @@ import torch
 from torch.nn import MSELoss
 from monai.config import print_config
 from monai.data import ArrayDataset, DataLoader, partition_dataset
-from monai.networks.nets import UNet
+from monai.networks.nets import UNet, UNETR, SwinUNETR
 from monai.transforms import (Compose, LoadImage, SaveImage, ScaleIntensity, Resize, RandAffine, EnsureChannelFirst, RandSpatialCrop)
 from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
-from ignite.metrics import MeanSquaredError
+from ignite.metrics import MeanSquaredError, Loss
 from ignite.handlers import ModelCheckpoint, EarlyStopping
 from monai.handlers import StatsHandler, TensorBoardStatsHandler
 
@@ -27,9 +27,9 @@ from utils.dataset import ct2dose_dataset
 # Initialize and parse command line arguments
 parser = argparse.ArgumentParser(description='3D Dose Prediction Project')
 parser.add_argument('--exp_name', type=str, default='unetr', help='Experiment name')
-parser.add_argument('--data_dir', type=str, default='common/niis_selected', help='Directory for input data')
+parser.add_argument('--data_dir', type=str, default='common/niis_lung', help='Directory for input data')
 parser.add_argument('--eval_interval', type=int, default=1, help='Interval of epochs to perform evaluation and visualization')
-parser.add_argument('--gpus', type=str, default='1,2,3,4', help='Comma-separated list of GPU IDs to use for training')
+parser.add_argument('--gpus', type=str, default='0,1,2,3,4,5,6,7', help='Comma-separated list of GPU IDs to use for training')
 args = parser.parse_args()
 
 # Configure GPUs for training
@@ -57,11 +57,14 @@ logging.info("Starting 3D Dose Prediction Project...")
 # Load dataset and split
 images = sorted(glob.glob(os.path.join(args.data_dir, "*/ct.nii.gz")))
 labels = sorted(glob.glob(os.path.join(args.data_dir, "*/dose.nii.gz")))
-train_loader, val_loader = ct2dose_dataset(images,labels)
+masks = sorted(glob.glob(os.path.join(args.data_dir, "*/struct.nii.gz")))
+train_loader, val_loader = ct2dose_dataset(images,labels,masks)
 
 # Define device and model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = UNet(spatial_dims=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256), strides=(2, 2, 2, 2), num_res_units=2).to(device)
+model = UNet(spatial_dims=3, in_channels=2, out_channels=1, channels=(16, 32, 64, 128, 256), strides=(2, 2, 2, 2), num_res_units=2).to(device)
+model = UNETR(spatial_dims=3, in_channels=2, out_channels=1,img_size=(96,96,96)).to(device)
+# model = SwinUNETR(spatial_dims=3, in_channels=2, out_channels=1,img_size=(96,96,96)).to(device)
 
 # Setup for multi-GPU training using DataParallel
 if torch.cuda.device_count() > 1 and args.gpus != '':
@@ -76,7 +79,19 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 # Create Ignite trainer and evaluator
 trainer = create_supervised_trainer(model, optimizer, loss_function, device=device)
-evaluator = create_supervised_evaluator(model, metrics={'MSE': MeanSquaredError()}, device=device)
+# evaluator = create_supervised_evaluator(model, metrics={'MSE': MeanSquaredError()}, device=device)
+# Define the evaluator with the additional Loss metric
+evaluator = create_supervised_evaluator(model, metrics={'MSE': MeanSquaredError(), 'loss': Loss(loss_function)}, device=device)
+
+# Function to print evaluation loss
+def print_evaluation_loss(engine):
+    mse = engine.state.metrics['MSE']
+    loss = engine.state.metrics['loss']
+    logging.info(f"Evaluation - Epoch: {engine.state.epoch}, MSE: {mse:.2f}, Loss: {loss:.2f}")
+
+# Attach the print function to the evaluator
+evaluator.add_event_handler(Events.COMPLETED, print_evaluation_loss)
+
 
 # Add handlers for logging, checkpointing, and tensorboard
 checkpoint_handler = ModelCheckpoint(exp_dir, 'checkpoint', n_saved=10, require_empty=False)
@@ -140,7 +155,7 @@ trainer.add_event_handler(Events.EPOCH_COMPLETED(every=args.eval_interval), eval
 
 # Run the training loop
 logging.info("Starting training...")
-max_epochs = 10
+max_epochs = 100
 trainer.run(train_loader, max_epochs=max_epochs)
 
 logging.info("Training completed.")
