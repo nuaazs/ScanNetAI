@@ -3,319 +3,199 @@
 # @Author  : zhaosheng@nuaa.edu.cn
 # @Describe: Prepare dataset (niis).
 
+import cv2
 import os
 import re
 import glob
-import argparse
-import pydicom
-import numpy as np
 import logging
+import warnings
+import argparse
+import numpy as np
 from tqdm import tqdm
 import SimpleITK as sitk
-import cv2
 from dicompylercore import dicomparser
+
+# Turnoff WARNING
+warnings.filterwarnings("ignore")
+sitk.ProcessObject_SetGlobalWarningDisplay(False)
 
 # Configure logging to output to both file and console
 log_formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
-log_file = 'data_prepare.log'
-
-file_handler = logging.FileHandler(log_file)
+file_handler = logging.FileHandler('data_prepare.log')
 file_handler.setFormatter(log_formatter)
-
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
-
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 
+def squeeze_image(image):
+    """Squeeze the image to remove dimensions of size 1."""
+    size = image.GetSize()
+    spacing = image.GetSpacing()
+    if len(size) == 3:
+        return image
+    new_size, new_spacing = [s for s in size if s != 1], [sp for s, sp in zip(size, spacing) if s != 1]
+    image_array = sitk.GetArrayFromImage(image).reshape(new_size)
+    new_image = sitk.GetImageFromArray(image_array)
+    new_image.SetSpacing(new_spacing)
+    return new_image
 
-# read dicom series
 def load_dicom_series(directory):
+    """Load DICOM series from the given directory."""
     reader = sitk.ImageSeriesReader()
     dicom_names = reader.GetGDCMSeriesFileNames(directory)
-    # print(dicom_names)
     reader.SetFileNames(dicom_names)
-    image = reader.Execute()
-    return image
+    return reader.Execute()
 
-# resample image
 def resample_image(image, new_spacing=[1.0, 1.0, 1.0]):
+    """Resample image to new spacing."""
     original_spacing = image.GetSpacing()
     original_size = image.GetSize()
-    
-    new_size = [
-        int(round(osz * ospc / nspc))
-        for osz, ospc, nspc in zip(original_size, original_spacing, new_spacing)
-    ]
+    new_size = [int(round(osz * ospc / nspc)) for osz, ospc, nspc in zip(original_size, original_spacing, new_spacing)]
     resample = sitk.ResampleImageFilter()
     resample.SetOutputSpacing(new_spacing)
     resample.SetSize(new_size)
     resample.SetInterpolator(sitk.sitkLinear)
     resample.SetOutputDirection(image.GetDirection())
     resample.SetOutputOrigin(image.GetOrigin())
-    resample.SetTransform(sitk.Transform())
-    
     return resample.Execute(image)
 
-# save nifti image
 def save_nifti(image, output_filename):
+    """Save the image as a NIFTI file."""
     sitk.WriteImage(image, output_filename, True)  # True for .nii.gz
 
-
 def find_rt_folders(root_path):
-    """
-    Find all folders under root_path following the pattern RT+6 digits.
-    """
+    """Find all RT folders under the given root path."""
     rt_pattern = re.compile(r'RT\d{6}')
-    for dirpath, dirnames, files in os.walk(root_path):
+    for dirpath, dirnames, _ in os.walk(root_path):
         for dirname in dirnames:
             if rt_pattern.match(dirname):
                 yield os.path.join(dirpath, dirname)
 
-def safe_crop_image_to_match(reference_image, target_image):
-    """
-    Safely crop the target_image to match the size and position of the reference_image.
-    Adjusts the ROI to ensure it is within the bounds of the target image.
-    """
-    reference_origin = reference_image.GetOrigin()
-    target_origin = target_image.GetOrigin()
-    reference_size = reference_image.GetSize()
-    target_size = target_image.GetSize()
-
-    # Calculate the difference between the origins in index space
-    origin_diff_index_space = target_image.TransformPhysicalPointToIndex(reference_origin)
-
-    # Calculate the end index of the ROI in the target image's index space
-    end_index = [start + size for start, size in zip(origin_diff_index_space, reference_size)]
-
-    # Adjust the size of the ROI to ensure it's within the target image bounds
-    adjusted_size = [min(end, targ_sz) - start for end, start, targ_sz in zip(end_index, origin_diff_index_space, target_size)]
-    
-    # Create the ROI filter
-    roi_filter = sitk.RegionOfInterestImageFilter()
-    roi_filter.SetSize(adjusted_size)
-    roi_filter.SetIndex(origin_diff_index_space)
-    
-    # Apply the ROI filter
-    cropped_target_image = roi_filter.Execute(target_image)
-    
-    return cropped_target_image
-
-
-
-def convert_structure_set_to_image(structure_set_path, reference_image):
-    # 读取 RT Structure Set
-    # rtss = sitk.ReadImage(structure_set_path)
-    rtss = pydicom.dcmread(structure_set_path,force=True)
-
-    # 创建一个与参考图像同样大小的空图像，用于存储转换后的结构集
-    label_map = sitk.Image(reference_image.GetSize(), sitk.sitkUInt8)
-    label_map.CopyInformation(reference_image)
-
-    # 获取 RT Structure Set 中所有轮廓的信息
-    label_seq = sitk.GetArrayViewFromImage(rtss)
-
-    # 遍历每个轮廓，将它们转换为图像
-    for label_num in range(1, label_seq.shape[0]):
-        label = label_seq[label_num,:,:,:]
-        label_image = sitk.GetImageFromArray(label)
-        label_image.CopyInformation(reference_image)
-        # 可能需要额外的处理来确保 label_image 与 reference_image 对齐
-        # 为每个轮廓生成一个二值图像
-        label_map = sitk.Maximum(label_map, label_image)
-    return label_map
-
 def drawslince(image, msk, contor):
+    """Draw a slice of contour on the mask."""
     ctor = []
     for point in contor:
         temppoint = image.TransformPhysicalPointToIndex(point)
         ctor.append((temppoint[0], temppoint[1]))
     ctor = np.array(ctor).reshape(-1, 1, 2)
-    msk = cv2.drawContours(msk, [ctor], -1, 1, thickness=cv2.FILLED)
-    return msk, temppoint[2]
+    return cv2.drawContours(msk, [ctor], -1, 1, thickness=cv2.FILLED), temppoint[2]
+
+def glob_files(root_path,re_string_list):
+    """find files by re list"""
+    for re_string in re_string_list:
+        r = sorted(glob.glob(os.path.join(root_path, re_string)))
+        if len(r)>0:
+            return r
+    return []
 
 def process_ct_dose(folder, output_path, resample_spacing):
-    """
-    Process CT and Dose DICOM files in the given folder, resample them, 
-    and save as NII.GZ files in the corresponding output folder.
-    """
+    """Process CT and Dose DICOM files for conversion to NII.GZ."""
+    ct_files = glob_files(folder, ['*_[cC][tT]*.[dD][cC][mM]','*[cC][tT]*.[dD][cC][mM]'])
+    dose_files = glob_files(folder, ['*_[dD][oO][sS][eE]*.[dD][cC][mM]','RD*.[dD][cC][mM]'])
+    struct_files = glob_files(folder, ['*_StrctrSets*.[dD][cC][mM]','RS*.[dD][cC][mM]'])
 
-    # Find CT and Dose files
-    print(os.path.join(folder, '*_[cC][tT]*.[dD][cC][mM]'))
-    ct_files = sorted(glob.glob(os.path.join(folder, '*_[cC][tT]*.[dD][cC][mM]')))
-    dose_files = sorted(glob.glob(os.path.join(folder, '*_[dD][oO][sS][eE]*.[dD][cC][mM]')))
-    struct_files = sorted(glob.glob(os.path.join(folder, '*_StrctrSets*.[dD][cC][mM]')))
-    
+    if not ct_files or not dose_files or not struct_files:
+        logging.warning(f'Missing files in {folder}')
+        logging.warning(f'*'*30)
+        logging.warning(f'=ERROR=ERROR='*3)
+        logging.warning(f"Dose file: {dose_files}")
+        logging.warning(f"CT file: {ct_files[0]} ... ")
+        logging.warning(f"RT file: {struct_files}")
+        logging.warning(f'*'*30)
+        return None, None, None
 
+    ct_image = resample_image(squeeze_image(load_dicom_series(folder)), resample_spacing)
+    dose_image = resample_image(squeeze_image(sitk.ReadImage(dose_files[0])), resample_spacing)
 
-    if (len(ct_files) <= 10):
-        ct_files = sorted(glob.glob(os.path.join(folder, '*[cC][tT]*.[dD][cC][mM]')))
-        print(f"find ct file ...")
-        print(os.path.join(folder, '*[cC][tT]*.[dD][cC][mM]'))
-        print(ct_files)
-        if len(ct_files) <= 0:
-            logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
-            print(f"!FILE ERROR: {folder}")
-            return None,None,None
-    if  len(struct_files) <= 0:
-        struct_files = sorted(glob.glob(os.path.join(folder, 'RS*.[dD][cC][mM]')))
-        print(f"find struct file ...")
-        print(os.path.join(folder, '*_StrctrSets*.[dD][cC][mM]'))
-        print(struct_files)
-        if len(struct_files) <= 0:
-            logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
-            print(f"!FILE ERROR: {folder}")
-            return None,None,None
-    if len(dose_files) <= 0:
-        dose_files = sorted(glob.glob(os.path.join(folder, 'RD*')))
-        print(f"find dose file ...")
-        print(os.path.join(folder, 'RD*.[dD][cC][mM]'))
-        print(dose_files)
-        if len(dose_files) <= 0:
-            logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
-            print(f"!FILE ERROR: {folder}")
-            return None,None,None
-    
-    # Process CT files
-    ct_image = load_dicom_series(folder)
-    
-    # Read dose
-    dose_image = sitk.ReadImage(dose_files[0])
-
-
+    # Processing structure file
     rtss = dicomparser.DicomParser(struct_files[0])
     rois = rtss.GetStructures()
-    roikey = [roi_id for roi_id in rois.keys() if "PTV" in rois[roi_id]['name'].upper()]
-    if len(roikey)<1:
-        logging.warning(f"ROI ERROR: {rois.keys()}")
-        print([rois[roi_id]['name'].upper() for roi_id in rois.keys()])
-        print(f"!FILE ERROR: {folder}")
-        return None,None,None
+    roikey = [roi_id for roi_id in rois if "PTV" in rois[roi_id]['name'].upper()]
+    if not roikey:
+        logging.warning(f"No ROI found in {folder}")
+        return None, None, None
+
     ct_size = ct_image.GetSize()
     mask = np.zeros(ct_size, dtype=np.uint8)
     roi = rtss.GetStructureCoordinates(roikey[0])
-    for slicer_i in roi.keys():
+    for slicer_i in roi:
         msk = np.zeros((ct_size[0], ct_size[1]))
-        maskcount = len(roi[slicer_i])
-        for i in range(maskcount):
-            tempcontor = roi[slicer_i][i]['data']
-            msk, slicenum = drawslince(ct_image, msk, tempcontor)
-        mask[:, :, slicenum] = msk
+        for contor in roi[slicer_i]:
+            msk, slicenum = drawslince(ct_image, msk, contor['data'])
+        try:
+            mask[:, :, slicenum] = msk
+        except Exception as e:
+            logging.error(f'Failed to process {folder}: {e}')
+            logging.warning(f'*'*30)
+            logging.warning(f'=ERROR=ERROR='*3)
+            logging.warning(f"Dose file: {dose_files}")
+            logging.warning(f"CT file: {ct_files[0]} ... ")
+            logging.warning(f"RT file: {struct_files}")
+            logging.warning(f'*'*30)
+            return None, None, None
     mask = mask.transpose((2, 0, 1))
     mask = sitk.GetImageFromArray(mask)
     mask.SetOrigin(ct_image.GetOrigin())
     mask.SetDirection(ct_image.GetDirection())
     mask.SetSpacing(ct_image.GetSpacing())
-    print(f"=============")
-
-
-
-    ct_image = resample_image(ct_image, resample_spacing)
-    dose_image = resample_image(dose_image, resample_spacing)
     mask_image = resample_image(mask, resample_spacing)
-    
-    
+
     dose_size = dose_image.GetSize()
     dose_origin = dose_image.GetOrigin()
 
-    # 计算两个图像的重叠区域
     ct_origin = ct_image.GetOrigin()
     dose_origin = dose_image.GetOrigin()
-
     ct_size = ct_image.GetSize()
     dose_size = dose_image.GetSize()
-
     ct_spacing = ct_image.GetSpacing()
     dose_spacing = dose_image.GetSpacing()
-
-    # 计算重叠区域的物理坐标
     overlap_start = [max(ct_origin[i], dose_origin[i]) for i in range(3)]
     overlap_end = [min(ct_origin[i] + ct_spacing[i]*ct_size[i], dose_origin[i] + dose_spacing[i]*dose_size[i]) for i in range(3)]
-
-    # 计算重叠区域在 CT 图像中的索引
     ct_index_start = [int(round((overlap_start[i] - ct_origin[i]) / ct_spacing[i])) for i in range(3)]
     ct_index_end = [int(round((overlap_end[i] - ct_origin[i]) / ct_spacing[i])) for i in range(3)]
 
-    # 裁剪 CT 图像
     cropped_ct_size = [ct_index_end[i] - ct_index_start[i] for i in range(3)]
     cropped_ct = sitk.RegionOfInterest(ct_image, cropped_ct_size, ct_index_start)
-
     cropped_mask_image = sitk.RegionOfInterest(mask_image, cropped_ct_size, ct_index_start)
 
-    # 裁剪剂量图像
     dose_index_start = [int(round((overlap_start[i] - dose_origin[i]) / dose_spacing[i])) for i in range(3)]
     dose_index_end = [int(round((overlap_end[i] - dose_origin[i]) / dose_spacing[i])) for i in range(3)]
     cropped_dose_size = [dose_index_end[i] - dose_index_start[i] for i in range(3)]
     cropped_dose = sitk.RegionOfInterest(dose_image, cropped_dose_size, dose_index_start)
 
-    logging.info(f'CT image shape: {cropped_ct.GetSize()}')
-    logging.info(f'Dose image shape: {cropped_dose.GetSize()}')
-    logging.info(f'CT image spacing: {cropped_ct.GetSpacing()}')
-    logging.info(f'Dose image spacing: {cropped_dose.GetSpacing()}')
-    logging.info(f'cropped_mask_image shape: {cropped_mask_image.GetSize()}')
-    logging.info(f'cropped_mask_image origin: {cropped_mask_image.GetOrigin()}')
+    save_nifti(cropped_ct, os.path.join(output_path, 'ct.nii.gz'))
+    save_nifti(cropped_dose, os.path.join(output_path, 'dose.nii.gz'))
+    save_nifti(cropped_mask_image, os.path.join(output_path, 'struct.nii.gz'))
 
-    if cropped_ct.GetSize() != cropped_dose.GetSize():
-        logging.warning('CT and Dose image sizes do not match!')
-        print(f"!SIZE ERROR: {folder}")
-        return None,None,None
-    if cropped_mask_image.GetSize() != cropped_dose.GetSize():
-        logging.warning('cropped_mask_image and Dose image sizes do not match!')
-        print(f"!SIZE ERROR: {folder}")
-        return None,None,None
-    if cropped_ct.GetSpacing() != cropped_dose.GetSpacing():
-        logging.warning('CT and Dose image spacings do not match!')
-        print(f"!SIZE ERROR: {folder}")
-        return None,None,None
-    dose_output_filename = os.path.join(output_path, 'dose.nii.gz')
-    save_nifti(cropped_dose, dose_output_filename)
-    ct_output_filename = os.path.join(output_path, 'ct.nii.gz')
-    save_nifti(cropped_ct, ct_output_filename)
-    struct_output_filename = os.path.join(output_path, 'struct.nii.gz')
-    save_nifti(cropped_mask_image, struct_output_filename)
-    return cropped_ct, cropped_dose, cropped_mask_image
+    return ct_image, dose_image, mask_image
 
 def main(root_path, output_path, resample_spacing):
-    """
-    Main function to process all RT folders under the root path.
-    """
-    # Ensure output directory exists
+    """Main function to process and convert DICOM to NII.GZ."""
     os.makedirs(output_path, exist_ok=True)
-    
     rt_folders = list(find_rt_folders(root_path))
     logging.info(f'Found {len(rt_folders)} RT folders to process.')
-
-    success_count = 0
-    failure_count = 0
-
-    # Process each RT folder with a progress bar
+    success_count,failure_count = 0,0
     with tqdm(total=len(rt_folders), desc='Processing RT folders') as progress_bar:
         for folder in rt_folders:
             rt_number = os.path.basename(folder)
             rt_output_path = os.path.join(output_path, rt_number)
             os.makedirs(rt_output_path, exist_ok=True)
-            logging.info(f'Processing RT folder {folder}')
-            # try:
-            cropped_ct, cropped_dose, cropped_mask = process_ct_dose(folder, rt_output_path, resample_spacing)
-            # except Exception as e:
-            #     logging.error(f'Failed to process RT folder {folder}: {e}')
-            #     failure_count += 1
-            #     progress_bar.update(1)
-            #     progress_bar.set_postfix_str(f'Success: {success_count}, Failure: {failure_count}, Success Rate: {success_count/(success_count+failure_count):.2%}')
-            #     continue
-            if cropped_ct is not None and cropped_dose is not None:
+            try:
+                ct_image, dose_image, mask_image = process_ct_dose(folder, rt_output_path, resample_spacing)
+            except Exception as e:
+                ct_image, dose_image, mask_image = None,None,None
+            if ct_image is not None:
                 success_count += 1
             else:
                 failure_count += 1
-
             progress_bar.update(1)
             progress_bar.set_postfix_str(f'Success: {success_count}, Failure: {failure_count}, Success Rate: {success_count/(success_count+failure_count):.2%}')
+        
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DICOM to NII.GZ Conversion Script')
     parser.add_argument('--root_path', type=str, default="/home/zhaosheng/Documents/LiuHuan/files/liuhuan_lung_plan_6000", help='Root path containing RT folders')
-    parser.add_argument('--output_path', type=str, default="./niis_lung", help='Output path for NII.GZ files')
+    parser.add_argument('--output_path', type=str, default="./niis_output", help='Output path for NII.GZ files')
     parser.add_argument('--resample_spacing', type=float, nargs=3, metavar=('X', 'Y', 'Z'), default=[3.0, 3.0, 3.0], help='Resampling spacing in X, Y, and Z dimensions')
     args = parser.parse_args()
-    
     main(args.root_path, args.output_path, args.resample_spacing)
-    # LOG: 557/557 [05:05<00:00,  1.82it/s, Success: 402, Failure: 155, Success Rate: 72.17%]
