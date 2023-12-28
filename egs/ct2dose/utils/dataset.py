@@ -20,6 +20,7 @@ from monai.transforms import (RandAffine, RandAffined, EnsureChannelFirst, Ensur
 from monai.transforms import (Lambda, RandFlip, RandFlipd, RandRotate90, RandRotate90d, Resize, Resized, ConcatItemsd)
 from monai.transforms import (DeleteItemsd)
 from monai.handlers import StatsHandler, TensorBoardStatsHandler
+
 def ct2dose_dataset(images, labels, masks):
     # Ensure the lengths of images, labels, and masks match
     assert len(images) == len(labels) == len(masks), "Mismatch in dataset lengths"

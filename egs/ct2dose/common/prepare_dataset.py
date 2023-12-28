@@ -145,10 +145,36 @@ def process_ct_dose(folder, output_path, resample_spacing):
     dose_files = sorted(glob.glob(os.path.join(folder, '*_[dD][oO][sS][eE]*.[dD][cC][mM]')))
     struct_files = sorted(glob.glob(os.path.join(folder, '*_StrctrSets*.[dD][cC][mM]')))
     
-    if (len(ct_files) <= 10) or (len(dose_files) <= 0) or (len(struct_files) <= 0):
-        logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
-        print(f"!FILE ERROR: {folder}")
-        return None,None,None
+
+
+    if (len(ct_files) <= 10):
+        ct_files = sorted(glob.glob(os.path.join(folder, '*[cC][tT]*.[dD][cC][mM]')))
+        print(f"find ct file ...")
+        print(os.path.join(folder, '*[cC][tT]*.[dD][cC][mM]'))
+        print(ct_files)
+        if len(ct_files) <= 0:
+            logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
+            print(f"!FILE ERROR: {folder}")
+            return None,None,None
+    if  len(struct_files) <= 0:
+        struct_files = sorted(glob.glob(os.path.join(folder, 'RS*.[dD][cC][mM]')))
+        print(f"find struct file ...")
+        print(os.path.join(folder, '*_StrctrSets*.[dD][cC][mM]'))
+        print(struct_files)
+        if len(struct_files) <= 0:
+            logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
+            print(f"!FILE ERROR: {folder}")
+            return None,None,None
+    if len(dose_files) <= 0:
+        dose_files = sorted(glob.glob(os.path.join(folder, 'RD*')))
+        print(f"find dose file ...")
+        print(os.path.join(folder, 'RD*.[dD][cC][mM]'))
+        print(dose_files)
+        if len(dose_files) <= 0:
+            logging.warning(f'CT files: {len(ct_files)}, Dose files: {len(dose_files)}')
+            print(f"!FILE ERROR: {folder}")
+            return None,None,None
+    
     # Process CT files
     ct_image = load_dicom_series(folder)
     
@@ -268,7 +294,14 @@ def main(root_path, output_path, resample_spacing):
             rt_output_path = os.path.join(output_path, rt_number)
             os.makedirs(rt_output_path, exist_ok=True)
             logging.info(f'Processing RT folder {folder}')
+            # try:
             cropped_ct, cropped_dose, cropped_mask = process_ct_dose(folder, rt_output_path, resample_spacing)
+            # except Exception as e:
+            #     logging.error(f'Failed to process RT folder {folder}: {e}')
+            #     failure_count += 1
+            #     progress_bar.update(1)
+            #     progress_bar.set_postfix_str(f'Success: {success_count}, Failure: {failure_count}, Success Rate: {success_count/(success_count+failure_count):.2%}')
+            #     continue
             if cropped_ct is not None and cropped_dose is not None:
                 success_count += 1
             else:
