@@ -10,6 +10,7 @@ import glob
 import logging
 import warnings
 import argparse
+import pydicom
 import numpy as np
 from tqdm import tqdm
 import SimpleITK as sitk
@@ -37,14 +38,28 @@ def squeeze_image(image):
     image_array = sitk.GetArrayFromImage(image).reshape(new_size)
     new_image = sitk.GetImageFromArray(image_array)
     new_image.SetSpacing(new_spacing)
+    # set origin
+    old_origin = image.GetOrigin()
+    new_origin = [old_origin[i] for i in range(3) if size[i] != 1]
+    new_image.SetOrigin(new_origin)
+    # set direction
+    old_direction = image.GetDirection()
+    new_direction = [old_direction[i] for i in range(9) if size[i] != 1]
+    new_image.SetDirection(new_direction)
+
     return new_image
 
-def load_dicom_series(directory):
+def load_dicom_series(directory,ct_re="*[cC][tT]*.[dD][cC][mM]"):
     """Load DICOM series from the given directory."""
-    reader = sitk.ImageSeriesReader()
-    dicom_names = reader.GetGDCMSeriesFileNames(directory)
-    reader.SetFileNames(dicom_names)
-    return reader.Execute()
+    dicom_files = [f for f in os.listdir(directory) if f.endswith('.dcm') or f.endswith('.DCM')]
+    dicom_files = sorted([f for f in dicom_files if not f.startswith('R') and ("_CT" in f.upper() or f.startswith("CT"))])
+    dicom_files = [os.path.join(directory, f) for f in dicom_files]
+    if dicom_files:
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(dicom_files)
+        return reader.Execute()
+    else:
+        return None
 
 def resample_image(image, new_spacing=[1.0, 1.0, 1.0]):
     """Resample image to new spacing."""
@@ -73,6 +88,8 @@ def find_rt_folders(root_path):
 
 def drawslince(image, msk, contor):
     """Draw a slice of contour on the mask."""
+    # logging.info(f"# drawslince -> CT IMAGE: {image.GetSize()}")
+    # logging.info(f"# drawslince -> CT IMAGE Sp: {image.GetSpacing()}")
     ctor = []
     for point in contor:
         temppoint = image.TransformPhysicalPointToIndex(point)
@@ -94,6 +111,7 @@ def process_ct_dose(folder, output_path, resample_spacing):
     dose_files = glob_files(folder, ['*_[dD][oO][sS][eE]*.[dD][cC][mM]','RD*.[dD][cC][mM]'])
     struct_files = glob_files(folder, ['*_StrctrSets*.[dD][cC][mM]','RS*.[dD][cC][mM]'])
 
+    
     if not ct_files or not dose_files or not struct_files:
         logging.warning(f'Missing files in {folder}')
         logging.warning(f'*'*30)
@@ -104,7 +122,12 @@ def process_ct_dose(folder, output_path, resample_spacing):
         logging.warning(f'*'*30)
         return None, None, None
 
-    ct_image = resample_image(squeeze_image(load_dicom_series(folder)), resample_spacing)
+    logging.warning(f'*'*30)
+    logging.warning(f"Dose file: {dose_files}")
+    logging.warning(f"CT file: {ct_files[0]} ... ")
+    logging.warning(f"RT file: {struct_files}")
+    logging.warning(f'*'*30)
+
     dose_image = resample_image(squeeze_image(sitk.ReadImage(dose_files[0])), resample_spacing)
 
     # Processing structure file
@@ -115,33 +138,35 @@ def process_ct_dose(folder, output_path, resample_spacing):
         logging.warning(f"No ROI found in {folder}")
         return None, None, None
 
+    ct_image = squeeze_image(load_dicom_series(folder))
     ct_size = ct_image.GetSize()
+
     mask = np.zeros(ct_size, dtype=np.uint8)
     roi = rtss.GetStructureCoordinates(roikey[0])
     for slicer_i in roi:
         msk = np.zeros((ct_size[0], ct_size[1]))
         for contor in roi[slicer_i]:
             msk, slicenum = drawslince(ct_image, msk, contor['data'])
-        try:
             mask[:, :, slicenum] = msk
-        except Exception as e:
-            logging.error(f'Failed to process {folder}: {e}')
-            logging.warning(f'*'*30)
-            logging.warning(f'=ERROR=ERROR='*3)
-            logging.warning(f"Dose file: {dose_files}")
-            logging.warning(f"CT file: {ct_files[0]} ... ")
-            logging.warning(f"RT file: {struct_files}")
-            logging.warning(f'*'*30)
-            return None, None, None
     mask = mask.transpose((2, 0, 1))
     mask = sitk.GetImageFromArray(mask)
     mask.SetOrigin(ct_image.GetOrigin())
     mask.SetDirection(ct_image.GetDirection())
     mask.SetSpacing(ct_image.GetSpacing())
-    mask_image = resample_image(mask, resample_spacing)
+    mask_image = squeeze_image(resample_image(mask, resample_spacing))
+    mask_size = mask_image.GetSize()
+
+    ct_image = resample_image(ct_image, resample_spacing)
+    dose_origin = dose_image.GetOrigin()
+    new_origin = [ct_image.GetOrigin()[0], ct_image.GetOrigin()[1], dose_origin[2]]
+    ct_image.SetOrigin(new_origin)
+    mask_image.SetOrigin(new_origin)
+
+
+    ct_size = ct_image.GetSize()
 
     dose_size = dose_image.GetSize()
-    dose_origin = dose_image.GetOrigin()
+    
 
     ct_origin = ct_image.GetOrigin()
     dose_origin = dose_image.GetOrigin()
@@ -149,12 +174,23 @@ def process_ct_dose(folder, output_path, resample_spacing):
     dose_size = dose_image.GetSize()
     ct_spacing = ct_image.GetSpacing()
     dose_spacing = dose_image.GetSpacing()
+
+    
+    print(f"CT: {ct_size}\nDose: {dose_size}\nMASK: {mask_size}")
+    print(f"CT: {ct_spacing}\nDose: {dose_spacing}\nMASK: {mask_image.GetSpacing()}")
+    print(f"CT: {ct_origin}\nDose: {dose_origin}\nMASK: {mask_image.GetOrigin()}")
+    
+
     overlap_start = [max(ct_origin[i], dose_origin[i]) for i in range(3)]
     overlap_end = [min(ct_origin[i] + ct_spacing[i]*ct_size[i], dose_origin[i] + dose_spacing[i]*dose_size[i]) for i in range(3)]
     ct_index_start = [int(round((overlap_start[i] - ct_origin[i]) / ct_spacing[i])) for i in range(3)]
     ct_index_end = [int(round((overlap_end[i] - ct_origin[i]) / ct_spacing[i])) for i in range(3)]
 
+    print(ct_index_start)
+    print(ct_index_end)
+
     cropped_ct_size = [ct_index_end[i] - ct_index_start[i] for i in range(3)]
+
     cropped_ct = sitk.RegionOfInterest(ct_image, cropped_ct_size, ct_index_start)
     cropped_mask_image = sitk.RegionOfInterest(mask_image, cropped_ct_size, ct_index_start)
 
@@ -162,7 +198,14 @@ def process_ct_dose(folder, output_path, resample_spacing):
     dose_index_end = [int(round((overlap_end[i] - dose_origin[i]) / dose_spacing[i])) for i in range(3)]
     cropped_dose_size = [dose_index_end[i] - dose_index_start[i] for i in range(3)]
     cropped_dose = sitk.RegionOfInterest(dose_image, cropped_dose_size, dose_index_start)
-
+    
+    logging.info(f"CT IMAGE: {cropped_ct.GetSize()}")
+    logging.info(f"CT IMAGE Sp: {cropped_ct.GetSpacing()}")
+    logging.info(f"DOSE IMAGE: {cropped_dose.GetSize()}")
+    logging.info(f"DOSE IMAGE Sp: {cropped_dose.GetSpacing()}")
+    logging.info(f"MASK IMAGE: {cropped_mask_image.GetSize()}")
+    logging.info(f"MASK IMAGE Sp: {cropped_mask_image.GetSpacing()}")
+    
     save_nifti(cropped_ct, os.path.join(output_path, 'ct.nii.gz'))
     save_nifti(cropped_dose, os.path.join(output_path, 'dose.nii.gz'))
     save_nifti(cropped_mask_image, os.path.join(output_path, 'struct.nii.gz'))
@@ -177,6 +220,13 @@ def main(root_path, output_path, resample_spacing):
     success_count,failure_count = 0,0
     with tqdm(total=len(rt_folders), desc='Processing RT folders') as progress_bar:
         for folder in rt_folders:
+            # if "RT221803" not in folder:
+            #     continue
+            tid = os.path.basename(folder)
+            if os.path.exists(os.path.join(output_path, tid, 'ct.nii.gz')):
+                logging.info(f'Skipping {folder}')
+                continue
+            print(f"Processing {folder}")
             rt_number = os.path.basename(folder)
             rt_output_path = os.path.join(output_path, rt_number)
             os.makedirs(rt_output_path, exist_ok=True)
